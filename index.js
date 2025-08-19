@@ -6,9 +6,11 @@ import chalk from "chalk";
 import cookieParser from "cookie-parser";
 import cors from "cors";
 import express from "express";
-import basicAuth from "express-basic-auth";
 import mime from "mime";
 import fetch from "node-fetch";
+import session from "express-session";
+import passport from "passport";
+import { Strategy as GoogleStrategy } from "passport-google-oauth20";
 // import { setupMasqr } from "./Masqr.js";
 import config from "./config.js";
 
@@ -22,17 +24,56 @@ const PORT = process.env.PORT || 8080;
 const cache = new Map();
 const CACHE_TTL = 30 * 24 * 60 * 60 * 1000; // Cache for 30 Days
 
-if (config.challenge !== false) {
-  console.log(
-    chalk.green("🔒 Password protection is enabled! Listing logins below"),
-  );
-  // biome-ignore lint/complexity/noForEach:
-  Object.entries(config.users).forEach(([username, password]) => {
-    console.log(chalk.blue(`Username: ${username}, Password: ${password}`));
-  });
-  app.use(basicAuth({ users: config.users, challenge: true }));
-}
+// ---------- UNIVERSAL GOOGLE LOGIN SETUP ----------
+const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
+app.use(session({
+  secret: "supersecretkey",
+  resave: false,
+  saveUninitialized: true
+}));
 
+app.use(passport.initialize());
+app.use(passport.session());
+
+passport.use(new GoogleStrategy({
+  clientID: process.env.GOOGLE_CLIENT_ID,
+  clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+  callbackURL: `${BASE_URL}/auth/google/callback`
+}, (accessToken, refreshToken, profile, done) => {
+  return done(null, profile);
+}));
+
+passport.serializeUser((user, done) => done(null, user));
+passport.deserializeUser((obj, done) => done(null, obj));
+
+// Replace password protection with allow list
+const allowedEmails = ["friend@gmail.com", "you@gmail.com"]; // your allow list
+
+// Start Google login
+app.get("/auth/google", passport.authenticate("google", { scope: ["profile", "email"] }));
+
+// Google callback
+app.get("/auth/google/callback",
+  passport.authenticate("google", { failureRedirect: "/" }),
+  (req, res) => {
+    const email = req.user.emails[0].value;
+    if (allowedEmails.includes(email)) {
+      res.redirect("/"); // redirect to main site in repo
+    } else {
+      res.send("You are not authorized.");
+    }
+  }
+);
+
+// Middleware to protect all pages like basicAuth
+function ensureAuth(req, res, next) {
+  if (req.path.startsWith("/auth")) return next(); // allow auth routes
+  if (req.isAuthenticated()) return next();
+  res.redirect("/auth/google");
+}
+app.use(ensureAuth);
+
+// ---------- ASSET ROUTES ----------
 app.get("/e/*", async (req, res, next) => {
   try {
     if (cache.has(req.path)) {
@@ -59,14 +100,10 @@ app.get("/e/*", async (req, res, next) => {
       }
     }
 
-    if (!reqTarget) {
-      return next();
-    }
+    if (!reqTarget) return next();
 
     const asset = await fetch(reqTarget);
-    if (!asset.ok) {
-      return next();
-    }
+    if (!asset.ok) return next();
 
     const data = Buffer.from(await asset.arrayBuffer());
     const ext = path.extname(reqTarget);
@@ -85,6 +122,7 @@ app.get("/e/*", async (req, res, next) => {
   }
 });
 
+// ---------- MIDDLEWARE ----------
 app.use(cookieParser());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -97,6 +135,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, "static")));
 app.use("/ca", cors({ origin: true }));
 
+// ---------- STATIC ROUTES ----------
 const routes = [
   { path: "/b", file: "apps.html" },
   { path: "/a", file: "games.html" },
@@ -106,13 +145,13 @@ const routes = [
   { path: "/", file: "index.html" },
 ];
 
-// biome-ignore lint/complexity/noForEach:
 routes.forEach(route => {
   app.get(route.path, (_req, res) => {
     res.sendFile(path.join(__dirname, "static", route.file));
   });
 });
 
+// ---------- ERROR HANDLING ----------
 app.use((req, res, next) => {
   res.status(404).sendFile(path.join(__dirname, "static", "404.html"));
 });
@@ -122,6 +161,7 @@ app.use((err, req, res, next) => {
   res.status(500).sendFile(path.join(__dirname, "static", "404.html"));
 });
 
+// ---------- SERVER ----------
 server.on("request", (req, res) => {
   if (bareServer.shouldRoute(req)) {
     bareServer.routeRequest(req, res);
