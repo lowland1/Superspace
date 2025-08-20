@@ -22,23 +22,34 @@ const PORT = process.env.PORT || 8080;
 const cache = new Map();
 const CACHE_TTL = 30 * 24 * 60 * 60 * 1000; // 30 days
 
-// ---------------- GOOGLE LOGIN SETUP ----------------
+// ---------------- CONFIG ----------------
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
-const ALLOWLIST_URL = "https://raw.githubusercontent.com/lowland1/Superspace/refs/heads/main/allowlist.json";
+const ALLOWLIST_URL = "https://raw.githubusercontent.com/lowland1/Superspace/main/allowlist.json";
+let cachedAllowlist = [];
+let lastFetchTime = 0;
+const ALLOWLIST_TTL = 5 * 60 * 1000; // cache allowlist 5 min
 
-// fetch latest allowlist
+// Fetch latest allowlist with caching
 async function getAllowlist() {
+  const now = Date.now();
+  if (now - lastFetchTime < ALLOWLIST_TTL && cachedAllowlist.length) {
+    return cachedAllowlist;
+  }
+
   try {
     const res = await fetch(ALLOWLIST_URL);
-    if (!res.ok) return [];
+    if (!res.ok) throw new Error(`Failed to fetch allowlist: ${res.status}`);
     const data = await res.json();
-    return data.emails || [];
+    cachedAllowlist = data.emails || [];
+    lastFetchTime = now;
+    return cachedAllowlist;
   } catch (err) {
     console.error("Error fetching allowlist:", err);
-    return [];
+    return cachedAllowlist; // fallback to last known
   }
 }
 
+// ---------------- SESSION & PASSPORT ----------------
 app.use(session({
   secret: "supersecretkey",
   resave: false,
@@ -49,7 +60,6 @@ app.use(session({
 app.use(passport.initialize());
 app.use(passport.session());
 
-// ---------------- GOOGLE STRATEGY ----------------
 passport.use(new GoogleStrategy({
   clientID: process.env.GOOGLE_CLIENT_ID,
   clientSecret: process.env.GOOGLE_CLIENT_SECRET,
@@ -68,10 +78,10 @@ app.get("/auth/google", passport.authenticate("google", { scope: ["profile", "em
 
 app.get("/auth/google/callback",
   passport.authenticate("google", { failureRedirect: "/" }),
-  (req, res) => {
+  async (req, res) => {
     if (!req.user.authorized) {
       if (req.session) req.session.destroy(() => {});
-      req.logout?.(() => {});
+      if (req.logout) req.logout(() => {});
       return res.send(`
         <script>
           alert("You are not authorized.");
@@ -89,12 +99,15 @@ app.get("/auth/google/callback",
 async function ensureAuth(req, res, next) {
   if (req.path.startsWith("/auth")) return next();
 
-  if (req.isAuthenticated() && req.session?.authorized) {
+  const allowlist = await getAllowlist();
+  const userEmail = req.user?.emails?.[0]?.value;
+
+  if (req.isAuthenticated() && allowlist.includes(userEmail) && req.session?.authorized) {
     return next();
   }
 
   if (req.session) req.session.destroy(() => {});
-  req.logout?.(() => {});
+  if (req.logout) req.logout(() => {});
   res.redirect("/auth/google");
 }
 
