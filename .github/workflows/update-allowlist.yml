@@ -1,0 +1,35 @@
+name: Update Allowlist
+
+on:
+  workflow_dispatch:
+    inputs:
+      email:
+        description: 'Email to add'
+        required: true
+
+jobs:
+  update-allowlist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Add email to allowlist
+        run: |
+          FILE="allowlist.json"
+          EMAIL="${{ github.event.inputs.email }}"
+          # Make sure the file exists
+          if [ ! -f "$FILE" ]; then
+            echo '{"emails":[]}' > $FILE
+          fi
+          # Add the email if not already in list
+          if ! grep -q "\"$EMAIL\"" $FILE; then
+            jq ".emails += [\"$EMAIL\"]" $FILE > tmp.$$.json && mv tmp.$$.json $FILE
+          fi
+
+      - name: Commit and push changes
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add allowlist.json
+          git commit -m "Add $EMAIL to allowlist"
+          git push
