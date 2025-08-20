@@ -11,6 +11,7 @@ import fetch from "node-fetch";
 import session from "express-session";
 import passport from "passport";
 import { Strategy as GoogleStrategy } from "passport-google-oauth20";
+import { google } from "googleapis";
 
 console.log(chalk.yellow("🚀 Starting server..."));
 
@@ -22,14 +23,40 @@ const PORT = process.env.PORT || 8080;
 const cache = new Map();
 const CACHE_TTL = 30 * 24 * 60 * 60 * 1000; // 30 days
 
+// ---------------- GOOGLE SHEET ALLOWLIST ----------------
+let allowedEmails = [];
+
+const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
+const SHEET_NAME = "Allowlist";
+const SERVICE_ACCOUNT_KEY_PATH = path.join(__dirname, "service-account.json"); // make sure your JSON is here
+
+async function fetchAllowlist() {
+  const auth = new google.auth.GoogleAuth({
+    keyFile: SERVICE_ACCOUNT_KEY_PATH,
+    scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+  });
+
+  const sheets = google.sheets({ version: "v4", auth });
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${SHEET_NAME}!A:A`
+  });
+
+  allowedEmails = response.data.values?.flat() || [];
+  console.log(chalk.green(`✅ Allowlist updated: ${allowedEmails.join(", ")}`));
+}
+
+// Refresh allowlist every 5 minutes
+fetchAllowlist();
+setInterval(fetchAllowlist, 5 * 60 * 1000);
+
 // ---------------- GOOGLE LOGIN SETUP ----------------
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
-const allowedEmails = ["friend@gmail.com", "you@gmail.com"];
 
 app.use(session({
   secret: "supersecretkey",
   resave: false,
-  saveUninitialized: false, // only create session when authorized
+  saveUninitialized: false,
   cookie: { httpOnly: true }
 }));
 
@@ -55,7 +82,6 @@ app.get("/auth/google/callback",
   passport.authenticate("google", { failureRedirect: "/" }),
   (req, res) => {
     if (!req.user.authorized) {
-      // safely destroy session if exists
       if (req.session) req.session.destroy(() => {});
       req.logout?.(() => {});
       return res.send(`
@@ -66,7 +92,6 @@ app.get("/auth/google/callback",
       `);
     }
 
-    // Authorized users keep session
     req.session.authorized = true;
     res.redirect("/");
   }
@@ -77,7 +102,6 @@ function ensureAuth(req, res, next) {
   if (req.path.startsWith("/auth")) return next();
   if (req.isAuthenticated() && req.user?.authorized && req.session?.authorized) return next();
 
-  // destroy invalid session safely
   if (req.session) req.session.destroy(() => {});
   req.logout?.(() => {});
   res.redirect("/auth/google");
