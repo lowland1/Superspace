@@ -24,24 +24,39 @@ const CACHE_TTL = 30 * 24 * 60 * 60 * 1000; // 30 days
 
 // ---------------- GOOGLE LOGIN SETUP ----------------
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
-const allowedEmails = ["friend@gmail.com", "you@gmail.com"];
+const ALLOWLIST_URL = "https://raw.githubusercontent.com/lowland1/Superspace/refs/heads/main/allowlist.json";
+
+// fetch latest allowlist
+async function getAllowlist() {
+  try {
+    const res = await fetch(ALLOWLIST_URL);
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.emails || [];
+  } catch (err) {
+    console.error("Error fetching allowlist:", err);
+    return [];
+  }
+}
 
 app.use(session({
   secret: "supersecretkey",
   resave: false,
-  saveUninitialized: false, // only create session when authorized
+  saveUninitialized: false,
   cookie: { httpOnly: true }
 }));
 
 app.use(passport.initialize());
 app.use(passport.session());
 
+// ---------------- GOOGLE STRATEGY ----------------
 passport.use(new GoogleStrategy({
   clientID: process.env.GOOGLE_CLIENT_ID,
   clientSecret: process.env.GOOGLE_CLIENT_SECRET,
   callbackURL: `${BASE_URL}/auth/google/callback`
-}, (accessToken, refreshToken, profile, done) => {
-  profile.authorized = allowedEmails.includes(profile.emails[0].value);
+}, async (accessToken, refreshToken, profile, done) => {
+  const allowlist = await getAllowlist();
+  profile.authorized = allowlist.includes(profile.emails[0].value);
   done(null, profile);
 }));
 
@@ -55,7 +70,6 @@ app.get("/auth/google/callback",
   passport.authenticate("google", { failureRedirect: "/" }),
   (req, res) => {
     if (!req.user.authorized) {
-      // safely destroy session if exists
       if (req.session) req.session.destroy(() => {});
       req.logout?.(() => {});
       return res.send(`
@@ -66,18 +80,19 @@ app.get("/auth/google/callback",
       `);
     }
 
-    // Authorized users keep session
     req.session.authorized = true;
     res.redirect("/");
   }
 );
 
 // ---------------- AUTH MIDDLEWARE ----------------
-function ensureAuth(req, res, next) {
+async function ensureAuth(req, res, next) {
   if (req.path.startsWith("/auth")) return next();
-  if (req.isAuthenticated() && req.user?.authorized && req.session?.authorized) return next();
 
-  // destroy invalid session safely
+  if (req.isAuthenticated() && req.session?.authorized) {
+    return next();
+  }
+
   if (req.session) req.session.destroy(() => {});
   req.logout?.(() => {});
   res.redirect("/auth/google");
