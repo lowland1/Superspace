@@ -11,8 +11,6 @@ import fetch from "node-fetch";
 import session from "express-session";
 import passport from "passport";
 import { Strategy as GoogleStrategy } from "passport-google-oauth20";
-// import { setupMasqr } from "./Masqr.js";
-import config from "./config.js";
 
 console.log(chalk.yellow("🚀 Starting server..."));
 
@@ -22,70 +20,78 @@ const app = express();
 const bareServer = createBareServer("/ca/");
 const PORT = process.env.PORT || 8080;
 const cache = new Map();
-const CACHE_TTL = 30 * 24 * 60 * 60 * 1000; // Cache for 30 Days
+const CACHE_TTL = 30 * 24 * 60 * 60 * 1000; // 30 days
 
-// ---------- UNIVERSAL GOOGLE LOGIN SETUP ----------
+// ---------------- GOOGLE LOGIN SETUP ----------------
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
+const allowedEmails = ["friend@gmail.com", "you@gmail.com"];
+
 app.use(session({
   secret: "supersecretkey",
   resave: false,
-  saveUninitialized: true
+  saveUninitialized: false, // only create session when authorized
+  cookie: { httpOnly: true }
 }));
 
 app.use(passport.initialize());
 app.use(passport.session());
-
-// Replace password protection with allow list
-const allowedEmails = ["friend@gmail.com", "you@gmail.com"]; // your allow list
 
 passport.use(new GoogleStrategy({
   clientID: process.env.GOOGLE_CLIENT_ID,
   clientSecret: process.env.GOOGLE_CLIENT_SECRET,
   callbackURL: `${BASE_URL}/auth/google/callback`
 }, (accessToken, refreshToken, profile, done) => {
-  const email = profile.emails[0].value;
-  // attach "authorized" flag directly to user object
-  profile.authorized = allowedEmails.includes(email);
-  return done(null, profile);
+  profile.authorized = allowedEmails.includes(profile.emails[0].value);
+  done(null, profile);
 }));
 
 passport.serializeUser((user, done) => done(null, user));
 passport.deserializeUser((obj, done) => done(null, obj));
 
-// Start Google login
+// ---------------- AUTH ROUTES ----------------
 app.get("/auth/google", passport.authenticate("google", { scope: ["profile", "email"] }));
 
-// Google callback
 app.get("/auth/google/callback",
   passport.authenticate("google", { failureRedirect: "/" }),
   (req, res) => {
-    if (req.user.authorized) {
-      res.redirect("/"); // redirect to main site in repo
-    } else {
-      req.logout(() => {}); // destroy unauthorized session
-      res.send("You are not authorized.");
+    if (!req.user.authorized) {
+      // safely destroy session if exists
+      if (req.session) req.session.destroy(() => {});
+      req.logout?.(() => {});
+      return res.send(`
+        <script>
+          alert("You are not authorized.");
+          window.location.href = "about:blank";
+        </script>
+      `);
     }
+
+    // Authorized users keep session
+    req.session.authorized = true;
+    res.redirect("/");
   }
 );
 
-// Middleware to protect all pages like basicAuth
+// ---------------- AUTH MIDDLEWARE ----------------
 function ensureAuth(req, res, next) {
-  if (req.path.startsWith("/auth")) return next(); // allow auth routes
-  if (req.isAuthenticated() && req.user?.authorized) return next();
-  
-  req.logout(() => {}); // clear invalid session
+  if (req.path.startsWith("/auth")) return next();
+  if (req.isAuthenticated() && req.user?.authorized && req.session?.authorized) return next();
+
+  // destroy invalid session safely
+  if (req.session) req.session.destroy(() => {});
+  req.logout?.(() => {});
   res.redirect("/auth/google");
 }
+
 app.use(ensureAuth);
 
-// ---------- ASSET ROUTES ----------
+// ---------------- ASSET ROUTES ----------------
 app.get("/e/*", async (req, res, next) => {
   try {
     if (cache.has(req.path)) {
       const { data, contentType, timestamp } = cache.get(req.path);
-      if (Date.now() - timestamp > CACHE_TTL) {
-        cache.delete(req.path);
-      } else {
+      if (Date.now() - timestamp > CACHE_TTL) cache.delete(req.path);
+      else {
         res.writeHead(200, { "Content-Type": contentType });
         return res.end(data);
       }
@@ -113,9 +119,7 @@ app.get("/e/*", async (req, res, next) => {
     const data = Buffer.from(await asset.arrayBuffer());
     const ext = path.extname(reqTarget);
     const no = [".unityweb"];
-    const contentType = no.includes(ext)
-      ? "application/octet-stream"
-      : mime.getType(ext);
+    const contentType = no.includes(ext) ? "application/octet-stream" : mime.getType(ext);
 
     cache.set(req.path, { data, contentType, timestamp: Date.now() });
     res.writeHead(200, { "Content-Type": contentType });
@@ -127,20 +131,14 @@ app.get("/e/*", async (req, res, next) => {
   }
 });
 
-// ---------- MIDDLEWARE ----------
+// ---------------- MIDDLEWARE ----------------
 app.use(cookieParser());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-
-/* if (process.env.MASQR === "true") {
-  console.log(chalk.green("Masqr is enabled"));
-  setupMasqr(app);
-} */
-
 app.use(express.static(path.join(__dirname, "static")));
 app.use("/ca", cors({ origin: true }));
 
-// ---------- STATIC ROUTES ----------
+// ---------------- STATIC ROUTES ----------------
 const routes = [
   { path: "/b", file: "apps.html" },
   { path: "/a", file: "games.html" },
@@ -151,40 +149,27 @@ const routes = [
 ];
 
 routes.forEach(route => {
-  app.get(route.path, (_req, res) => {
-    res.sendFile(path.join(__dirname, "static", route.file));
-  });
+  app.get(route.path, (_req, res) => res.sendFile(path.join(__dirname, "static", route.file)));
 });
 
-// ---------- ERROR HANDLING ----------
-app.use((req, res, next) => {
-  res.status(404).sendFile(path.join(__dirname, "static", "404.html"));
-});
-
+// ---------------- ERROR HANDLING ----------------
+app.use((req, res) => res.status(404).sendFile(path.join(__dirname, "static", "404.html")));
 app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(500).sendFile(path.join(__dirname, "static", "404.html"));
 });
 
-// ---------- SERVER ----------
+// ---------------- SERVER ----------------
 server.on("request", (req, res) => {
-  if (bareServer.shouldRoute(req)) {
-    bareServer.routeRequest(req, res);
-  } else {
-    app(req, res);
-  }
+  if (bareServer.shouldRoute(req)) bareServer.routeRequest(req, res);
+  else app(req, res);
 });
 
 server.on("upgrade", (req, socket, head) => {
-  if (bareServer.shouldRoute(req)) {
-    bareServer.routeUpgrade(req, socket, head);
-  } else {
-    socket.end();
-  }
+  if (bareServer.shouldRoute(req)) bareServer.routeUpgrade(req, socket, head);
+  else socket.end();
 });
 
-server.on("listening", () => {
-  console.log(chalk.green(`🌍 Server is running on http://localhost:${PORT}`));
+server.listen({ port: PORT }, () => {
+  console.log(chalk.green(`🌍 Server running on http://localhost:${PORT}`));
 });
-
-server.listen({ port: PORT });
