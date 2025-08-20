@@ -35,19 +35,22 @@ app.use(session({
 app.use(passport.initialize());
 app.use(passport.session());
 
+// Replace password protection with allow list
+const allowedEmails = ["friend@gmail.com", "you@gmail.com"]; // your allow list
+
 passport.use(new GoogleStrategy({
   clientID: process.env.GOOGLE_CLIENT_ID,
   clientSecret: process.env.GOOGLE_CLIENT_SECRET,
   callbackURL: `${BASE_URL}/auth/google/callback`
 }, (accessToken, refreshToken, profile, done) => {
+  const email = profile.emails[0].value;
+  // attach "authorized" flag directly to user object
+  profile.authorized = allowedEmails.includes(email);
   return done(null, profile);
 }));
 
 passport.serializeUser((user, done) => done(null, user));
 passport.deserializeUser((obj, done) => done(null, obj));
-
-// Replace password protection with allow list
-const allowedEmails = ["friend@gmail.com", "you@gmail.com"]; // your allow list
 
 // Start Google login
 app.get("/auth/google", passport.authenticate("google", { scope: ["profile", "email"] }));
@@ -56,10 +59,10 @@ app.get("/auth/google", passport.authenticate("google", { scope: ["profile", "em
 app.get("/auth/google/callback",
   passport.authenticate("google", { failureRedirect: "/" }),
   (req, res) => {
-    const email = req.user.emails[0].value;
-    if (allowedEmails.includes(email)) {
+    if (req.user.authorized) {
       res.redirect("/"); // redirect to main site in repo
     } else {
+      req.logout(() => {}); // destroy unauthorized session
       res.send("You are not authorized.");
     }
   }
@@ -68,7 +71,9 @@ app.get("/auth/google/callback",
 // Middleware to protect all pages like basicAuth
 function ensureAuth(req, res, next) {
   if (req.path.startsWith("/auth")) return next(); // allow auth routes
-  if (req.isAuthenticated()) return next();
+  if (req.isAuthenticated() && req.user?.authorized) return next();
+  
+  req.logout(() => {}); // clear invalid session
   res.redirect("/auth/google");
 }
 app.use(ensureAuth);
